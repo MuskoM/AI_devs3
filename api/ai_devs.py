@@ -54,10 +54,16 @@ async def poligon_task():
 @router.get('/captcha')
 async def captcha_task():
     LOG.info('Executing Captcha Task')
+<<<<<<< HEAD
     task_secrets = store.read_task_secrets('captcha')
     task_url = task_secrets.get('task_url', '')
     login = task_secrets.get('login', '')
     password = task_secrets.get('password','')
+=======
+    task_url = 'https://xxxxxxxxx'
+    login = 'tester'
+    password = '574e112a'
+>>>>>>> 6fbfd89cd8ab088dcb05b5bee252c06b44d84c35
     page_html = await get_page_html(task_url)
     prompt = f'''
     Given a html page, find a question on the page that is supposed to be filled by a human.
@@ -98,6 +104,10 @@ async def captcha_task():
     '''
     found_info = await send_once([{'role': 'system', 'content': prompt}, {'role':'user', 'content': user_msg}])
     return found_info
+<<<<<<< HEAD
+=======
+
+>>>>>>> 6fbfd89cd8ab088dcb05b5bee252c06b44d84c35
 
 
 @router.get('/bypass_check')
