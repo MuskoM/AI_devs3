@@ -1,15 +1,18 @@
-from os import environ, system
+import asyncio
+from os import environ
 from typing import Any
 import json
 
 from fastapi import APIRouter
-from httpx import AsyncClient
+from httpx import AsyncClient, HTTPStatusError
 from loguru import logger as LOG
 import yaml
 
 from models.ai_devs import AiDevsAnswer
 from services.ai.model import send_once
 from services.ai_devs.task_api_v3 import send_answer
+from services.data_transformers import chunker
+from services.memory.cache_service import SimpleHTTPCacheService
 from services.web.web_interaction import send_dict_as_json, send_form, get_page
 
 class AIDevsStore:
@@ -109,7 +112,6 @@ async def captcha_task():
 async def bypass_check_task():
     task_secrets = store.read_task_secrets('bypass_check')
     authorization_endpoint = task_secrets.get('task_url', '')
-    prompt_url = task_secrets.get('data_source', '')
     system_prompt = '''
     You are a secret agent responsible for fooling a machine to think that you are one.
     Given an instruction set from the robot firmware search for important pieces of information on how to fool the system. Those information will be helpful for passing the checkup. Depending on the status of the conversation you MUST either:
@@ -174,6 +176,7 @@ async def bypass_check_task():
     
     model_output = await send_once([
             {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': 'send ready command'},
         ])
 
     LOG.info(f'Authorized {model_output}')
@@ -191,5 +194,94 @@ async def bypass_check_task():
         authorization_result = await send_dict_as_json(authorization_endpoint, json.loads(model_output))
 
         return authorization_result.json()
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as err:
         LOG.error('Unable to parse response')
+        return {'error': str(err)}
+    except HTTPStatusError as err:
+        LOG.error('Error occured when sending a HTTP request {}', err.response.status_code)
+        return {'error': f'{err.response.status_code} - {err.request}'}
+
+@router.get('/corrupt_json')
+async def corrupt_json():
+    task_secrets = store.read_task_secrets('corrupt_json')
+    source_json_url: str = task_secrets.get('source_json','')
+    submit_task_url: str = task_secrets.get('submit_url','')
+    source_json_url: str = source_json_url.replace('<apikey>', environ['AI_DEVS_TASK_KEY'])
+    cache = SimpleHTTPCacheService()
+    
+    json_file = cache.get(source_json_url)
+    if not json_file:
+        json_file = await get_page(source_json_url)
+        cache.save(source_json_url, json_file)
+
+    json_data = json.loads(json_file)
+    test_data_chunker = chunker.BasicChunker(json_data['test-data'])
+
+    chunks = test_data_chunker.chunk(100)
+
+
+    system_prompt = '''
+    You will be given a subset of testing data for a AI testing program, be very careful when reviewing the provided information.
+    Questions mostly consist of a simple additions, and an easy trivia question.
+    You are responsible for identifying the incorrect answers AND answering simple trivia questions.
+    Don't try to fix the calculations, just print out the incorrectt ones, for the trivia questions return the answer with a question.
+
+    ---Goal
+    Review the data provided in a JSON format, locate the incorrect and missing answers
+    ---Goal
+
+    ---Rules
+    - When the question is a trivia you answer MUST be short and concise,
+    - Answer MUST be a valid JSON,
+    ---Rules
+
+    ---Examples
+    <Input>
+    [
+        {
+            "question": "77 + 43",
+            "answer": 120,
+            "test": {
+                "q": "What is the capital city of France?",
+                "a": "???"
+            }
+        },
+        {
+            "question": "30 + 58",
+            "answer": 40
+        },
+        {
+            "question": "58 + 77",
+            "answer": 135
+        },
+    ]
+    </Input>
+    </Output
+    [
+       {
+           "question": "77 + 43",
+           "answer": 120,
+           "test": {       
+                "q": "What is the capital city of France?",
+                "a": "Paris"
+            },
+        {
+            "question": [30, 58],
+            "answer": 40
+        },
+    ]
+    </Output
+    ---Examples
+    '''
+    
+    coro = [send_once([
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': json.dumps(chunk)}
+            ]) for chunk in chunks]
+    LOG.info('Prepared {} coroutines to execute', len(coro))
+    res = await asyncio.gather(*coro)
+
+    return res[0]
+
+
+
