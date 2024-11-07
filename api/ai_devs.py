@@ -203,6 +203,29 @@ async def bypass_check_task():
 
 @router.get('/corrupt_json')
 async def corrupt_json():
+    def check_calculation(calculation: dict[str,Any]):
+        def calculate_addition(addition: str) -> int:
+            a, b = [int(x) for x in addition.split('+')]
+            return a + b
+        recalculated_answer = calculate_addition(calculation['question'])
+        if calculation['answer'] != recalculated_answer:
+            LOG.info('Found incorrect answer {} => {}', calculation['question'], calculation['answer'])
+            obj = {**calculation}
+            obj['answer'] = recalculated_answer 
+            return obj
+        else:
+            return calculation
+    
+    def answer_question(test_data_instance: dict[str,Any], answers: dict[str,str]):
+        if 'test' in test_data_instance:
+            test_q = test_data_instance['test']
+            test_q['a'] = answers[test_q['q']]
+            obj = test_data_instance
+            obj['test'] = test_q
+            return obj
+        else:
+            return test_data_instance
+
     task_secrets = store.read_task_secrets('corrupt_json')
     source_json_url: str = task_secrets.get('source_json','')
     submit_task_url: str = task_secrets.get('submit_url','')
@@ -215,28 +238,35 @@ async def corrupt_json():
         cache.save(source_json_url, json_file)
 
     json_data = json.loads(json_file)
-    test_data_chunker = chunker.BasicChunker(json_data['test-data'])
+    
+    fixed_test_data = []
+    for c in json_data['test-data']:
+        fixed_test_data.append(check_calculation(c))
+    
+    json_data['test-data'] = fixed_test_data
 
+    test_data_chunker = chunker.BasicChunker(json_data['test-data'])
     chunks = test_data_chunker.chunk(100)
 
-
     system_prompt = '''
-    You will be given a subset of testing data for a AI testing program, be very careful when reviewing the provided information.
+    I'm responsible for reviewing testing data for a AI testing program, I'm very careful when reviewing the provided information.
     Questions mostly consist of a simple additions, and an easy trivia question.
-    You are responsible for identifying the incorrect answers AND answering simple trivia questions.
-    Don't try to fix the calculations, just print out the incorrectt ones, for the trivia questions return the answer with a question.
+    My sole responsibility is to answer simple trivia questions.
+    I can't do any calculations so I IGNORE them. I will find and answer trivia questions.
 
     ---Goal
-    Review the data provided in a JSON format, locate the incorrect and missing answers
-    ---Goal
+    Review the data provided in a JSON format, locate missing answers and answer them
+    ---
 
     ---Rules
-    - When the question is a trivia you answer MUST be short and concise,
-    - Answer MUST be a valid JSON,
-    ---Rules
+    - I MUST be short and concise,
+    - I MUST return an answer in valid JSON format
+    - My response MUST begin with '[' and end with ']'
+    - If there are no questions in the test data I return '[]' (empty array)
+    ---
 
     ---Examples
-    <Input>
+    ---Test data
     [
         {
             "question": "77 + 43",
@@ -249,29 +279,34 @@ async def corrupt_json():
         {
             "question": "30 + 58",
             "answer": 40
+            "test": {
+                "q": "Who was the first president of USA",
+                "a": "???"
+            }
         },
         {
             "question": "58 + 77",
             "answer": 135
         },
     ]
-    </Input>
-    </Output
+    ---
+
+    ---My response
     [
-       {
-           "question": "77 + 43",
-           "answer": 120,
-           "test": {       
-                "q": "What is the capital city of France?",
-                "a": "Paris"
-            },
         {
-            "question": [30, 58],
-            "answer": 40
+            "q": "What is the capital city of France?",
+            "a": "Paris"
         },
+        {
+            "q": "Who was the first president of USA",
+            "a": "George Washington"
+        }
+
     ]
-    </Output
-    ---Examples
+    ---
+    ---
+
+    I can only do the task that was described before, and output only in valid JSON format.
     '''
     
     coro = [send_once([
@@ -280,8 +315,29 @@ async def corrupt_json():
             ]) for chunk in chunks]
     LOG.info('Prepared {} coroutines to execute', len(coro))
     res = await asyncio.gather(*coro)
+    json_responses = []
+    for resp in res:
+        try:
+            obj = json.loads(resp)
+            if obj:
+                json_responses.extend(obj)
+        except json.JSONDecodeError:
+            LOG.error('Unable to decode {}',resp)
 
-    return res[0]
+    LOG.info('Responses {}', json_responses)
+    answers = {k['q']:k['a'] for k in json_responses}
+    LOG.info('Prepared answers {}', answers)
+
+    answered_test_data = []
+    for t_d in json_data['test-data']:
+        answered_test_data.append(answer_question(t_d, answers))
+
+    json_data['test-data'] = answered_test_data
+    json_data['apikey'] = API_TASK_KEY 
+
+    task_answer_response = await send_answer(AiDevsAnswer(task='JSON',apikey=API_TASK_KEY,answer=json_data), submit_task_url)
+
+    return task_answer_response
 
 
 

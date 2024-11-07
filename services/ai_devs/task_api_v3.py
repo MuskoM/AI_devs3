@@ -12,6 +12,6 @@ async def send_answer(answer: AiDevsAnswer, url: str = VERIFICATION_URL):
         api_response = await client.post(url=url, json=answer.model_dump())
         try:
             api_response.raise_for_status()
-        except HTTPStatusError:
-            return AiDevsResponse(code=2137, message='Ungodly answer')
+        except HTTPStatusError as err:
+            return AiDevsResponse(code=2137, message=str(err))
         return AiDevsResponse(**api_response.json())
