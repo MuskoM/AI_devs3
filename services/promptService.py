@@ -4,6 +4,8 @@ from langfuse import Langfuse
 from langfuse.api.resources.dataset_items.client import NotFoundError
 from loguru import logger as LOG
 
+from exceptions import ApiException
+
 class PromptService:
     def __init__(self, **params: Any) -> None:
         self.params: dict[str, Any] = params
@@ -15,6 +17,6 @@ class PromptService:
             compiled_prompt = prompt.compile(**prompt_vars)
         except NotFoundError:
             LOG.error('{} prompt not found', prompt_name)
-            raise RuntimeError('Prompt not found')
+            raise ApiException('Prompt not found')
 
         return compiled_prompt, prompt

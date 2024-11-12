@@ -1,8 +1,8 @@
 import pathlib as p
 from base64 import urlsafe_b64encode
 
-class SimpleHTTPCacheService:
-    CACHE_DIR = './cache'
+class FileCacheService:
+    CACHE_DIR = './.cache'
     def __init__(self) -> None:
         self.cache_dir_path = p.Path(self.CACHE_DIR)
         self._ensure_cache_dir()

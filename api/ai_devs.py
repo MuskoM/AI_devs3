@@ -3,19 +3,20 @@ from os import environ
 from typing import Annotated, Any
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, UploadFile
 from fastapi.responses import JSONResponse
 from httpx import AsyncClient, HTTPStatusError
 from loguru import logger as LOG
 import yaml
 
+from exceptions import ApiException
 from models.ai_devs import AiDevsAnswer
-from services.ai.model import send_once
+from services.ai.modelService import send_once, transcribe
 from services.ai_devs.task_api_v3 import send_answer
 from services.data_transformers import chunker
-from services.memory.cache_service import SimpleHTTPCacheService
+from services.memory.cache_service import FileCacheService
 from services.web.web_interaction import send_dict_as_json, send_form, get_page
-from services.promptService import PromptService
+from services.prompts import PromptService
 
 class AIDevsStore:
     def __init__(self) -> None:
@@ -36,7 +37,7 @@ class AIDevsStore:
         return {}
 
 store = AIDevsStore()
-promp_service = PromptService(label='ai_devs')
+prompt_service = PromptService(label='ai_devs')
 
 def task_secrets():
     return store.read_task_secrets('corrupt_json')
@@ -81,8 +82,8 @@ async def captcha_task(secrets: TaskSecrets):
     page_html = await get_page(task_url)
 
     try:
-        system_prompt, lf_prompt = promp_service.get_prompt('AI_DEVS_CAPTCHA_SYSTEM_0', page_html=page_html)
-    except RuntimeError as err:
+        system_prompt, lf_prompt = prompt_service.get_prompt('AI_DEVS_CAPTCHA_SYSTEM_0', page_html=page_html)
+    except ApiException as err:
         return JSONResponse(content=str(err), status_code=500)
     user_msg = 'What is the answer for a question on a login page?'
     # Get page
@@ -91,8 +92,8 @@ async def captcha_task(secrets: TaskSecrets):
 
     successful_login_page = await send_form(task_url, {'username': login, 'password':password, 'answer': number})
     try:
-        system_prompt, lf_prompt = promp_service.get_prompt('AI_DEVS_CAPTCHA_SYSTEM', successful_login_page=successful_login_page)
-    except RuntimeError as err:
+        system_prompt, lf_prompt = prompt_service.get_prompt('AI_DEVS_CAPTCHA_SYSTEM', successful_login_page=successful_login_page)
+    except ApiException as err:
         return JSONResponse(content=str(err), status_code=500)
     user_msg = '''
     We are looking for a flag with format {{ FLG:TEXT}}}, if its found return it.
@@ -108,8 +109,8 @@ async def bypass_check_task(secrets: TaskSecrets):
     secrets = store.read_task_secrets('bypass_check')
     authorization_endpoint = secrets.get('task_url', '')
     try:
-        system_prompt, lf_prompt = promp_service.get_prompt('AI_DEVS_BYPASS_CHECK_SYSTEM')
-    except RuntimeError as err:
+        system_prompt, lf_prompt = prompt_service.get_prompt('AI_DEVS_BYPASS_CHECK_SYSTEM')
+    except ApiException as err:
         return JSONResponse(content=str(err), status_code=500)
     
     model_output = await send_once([
@@ -166,7 +167,7 @@ async def corrupt_json(secrets: TaskSecrets):
     source_json_url: str = secrets.get('source_json','')
     submit_task_url: str = secrets.get('submit_url','')
     source_json_url: str = source_json_url.replace('<apikey>', environ['AI_DEVS_TASK_KEY'])
-    cache = SimpleHTTPCacheService()
+    cache = FileCacheService() 
     
     json_file = cache.get(source_json_url)
     if not json_file:
@@ -185,8 +186,8 @@ async def corrupt_json(secrets: TaskSecrets):
     chunks = test_data_chunker.chunk(100)
 
     try:
-        system_prompt, lf_prompt = promp_service.get_prompt('AI_DEVS_CORRUPT_JSON_SYSTEM')
-    except RuntimeError as err:
+        system_prompt, lf_prompt = prompt_service.get_prompt('AI_DEVS_CORRUPT_JSON_SYSTEM')
+    except ApiException as err:
         return JSONResponse(content=str(err), status_code=500)
     
     coro = [send_once([
@@ -230,8 +231,8 @@ async def cenzura_task(secrets: TaskSecrets):
     source_text: str = await get_page(source_text_url)
     LOG.debug('Fetched {}', source_text)
     try:
-        system_prompt, lf_prompt = promp_service.get_prompt('AI_DEVS_CENZURA_SYSTEM')
-    except RuntimeError as err:
+        system_prompt, lf_prompt = prompt_service.get_prompt('AI_DEVS_CENZURA_SYSTEM')
+    except ApiException as err:
         return JSONResponse(content=str(err), status_code=500)
 
     user_prompt = source_text
@@ -242,3 +243,43 @@ async def cenzura_task(secrets: TaskSecrets):
     ],langfuse_prompt=lf_prompt)
 
     return await send_answer(AiDevsAnswer(task='cenzura', apikey=API_TASK_KEY, answer=llm_response), submit_task_url)
+
+@router.post('/mp3')
+async def transcript_audio_files(audio_files: list[UploadFile]):
+    secrets = store.read_task_secrets('mp3')
+    submit_task_url: str = secrets.get('submit_url','')
+    async def transcribe_audio(file: UploadFile):
+        file_name = file.filename if file.filename else ''
+        try:
+            transcription = cache.get(file_name)
+            if not transcription:
+                transcription = await transcribe(await file.read())
+                cache.save(file_name, transcription)
+            return transcription
+        except ApiException:
+            LOG.error('Unable to process file {}',file_name)
+
+
+    cache = FileCacheService()
+    responses: list[str | None] = await asyncio.gather(*[
+        transcribe_audio(file) for file in audio_files
+    ])
+
+    transcription_context = '\n-' + '\n-'.join([r for r in responses if r])
+    try:
+        system_prompt, lf_prompt = prompt_service.get_prompt('AI_DEVS_MP3_SYSTEM', evidence=transcription_context)
+    except ApiException as err:
+        return JSONResponse(content=str(err), status_code=500)
+
+    user_prompt = '''
+    We are looking for a man named Andrzej Maj, we have to find the address of the univeristy where he teaches his students.
+    Find out the exact addresses of all matching institutions, and return those as a full addresses <STREET>, <CITY>, <COUNTRY>
+    '''
+
+    llm_response = await send_once([
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': user_prompt},
+    ], langfuse_prompt = lf_prompt, model='gpt-4o')
+
+    return await send_answer(AiDevsAnswer(task='mp3', apikey=API_TASK_KEY, answer=llm_response), submit_task_url)
+
