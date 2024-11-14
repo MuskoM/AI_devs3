@@ -5,6 +5,26 @@ from langfuse.openai import AsyncOpenAI
 
 from exceptions import ApiException
 
+async def complete_task(system_prompt: str, data_prompt: str) -> str:
+    async with AsyncOpenAI() as ai:
+        response = await ai.chat.completions.create( # type: ignore
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': data_prompt}
+            ]
+        )
+        return str(response.choices[0].message.content)
+
+async def complete_task_local(system_prompt: str, data_prompt: str) -> str:
+    async with AsyncOpenAI() as ai:
+        response = await ai.chat.completions.create( # type: ignore
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': data_prompt}
+            ]
+        )
+        return str(response.choices[0].message.content)
+
 async def send_once(messages: list, model = 'gpt-4o-mini', **kwargs) -> str:
     async with AsyncOpenAI() as ai:
         response = await ai.chat.completions.create(
