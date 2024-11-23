@@ -4,7 +4,7 @@ from loguru import logger as LOG
 
 from models.ai_devs import AiDevsAnswer, AiDevsResponse
 
-VERIFICATION_URL = os.environ.get('AI_DEVS_TASK_URL','https://poligon.aidevs.pl/verify')
+VERIFICATION_URL = os.environ.get('AI_DEVS_TASK_URL','https://centrala.ag3nts.org/report')
 
 async def send_answer(answer: AiDevsAnswer, url: str = VERIFICATION_URL):
     LOG.info('Sending task answer, {} to {}', answer.model_dump_json(), url)

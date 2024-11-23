@@ -1,11 +1,13 @@
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Form, UploadFile, File
 from loguru import logger as LOG
+from openai.types import image
 
 from models.chat import *
 from services import conversationService as con
 from services.db import get_session
+from services.ai import modelService as ai
 
 DBSession = Annotated[Session, Depends(get_session)]
 
@@ -22,6 +24,19 @@ def chat(messageBody: CreateMessage):
 def attach_file():
     ...
 
+@chat_router.post('/ask_once')
+async def ask_once(
+        image: Optional[UploadFile] = File(default=None),
+        system_prompt: str = Form(...),
+        user_msg: str = Form(...),
+):
+    if image:
+        return await ai.ask_about_image(system_prompt, image.file.read(), user_msg)
+    else:
+        return await ai.send_once(messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_msg}
+        ])
 
 conversational_router = APIRouter(prefix='/conversational')
 

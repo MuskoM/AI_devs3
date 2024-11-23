@@ -1,10 +1,11 @@
+from fastapi import UploadFile
 from pytz import utc
-from typing import Annotated, Literal
+from typing import Literal, Optional
 from uuid import uuid4, UUID
 
-from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
+from sqlmodel import Field, SQLModel, Relationship, Session
 from datetime import datetime
-from pydantic import BaseModel
+
 
 AttachmentType = Literal['image','document','website','audio','video']
 

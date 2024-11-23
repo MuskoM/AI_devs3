@@ -1,6 +1,12 @@
 from itertools import batched
+import re
 
-from loguru import logger as LOG
+class StringChunker:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def chunk_by_regex(self, reg: str):
+        return re.split(reg, self._text)
 
 class BasicChunker:
     _data: dict | list | str
