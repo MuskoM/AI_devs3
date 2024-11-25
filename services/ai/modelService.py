@@ -71,10 +71,12 @@ async def transcribe(audio_file: bytes):
         api_key=os.environ['GROQ_API_KEY']
     ) as ai:
         try:
+            LOG.info('Trying to transcribe the data {}',audio_file[:10])
             response = await ai.audio.transcriptions.create(
                 model='whisper-large-v3',
                 file=file_buffer
             )
+            LOG.info('Transcription endpoint responded with {}', response.model_dump_json())
             return response.model_dump()['text']
         except Exception as err:
             err_msg = 'Error occured when trying to transcribe the audio file {}'

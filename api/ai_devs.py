@@ -448,20 +448,19 @@ async def arxiv():
 
     async def get_context_from_data(link: MarkdownLink):
         system_prompt = '''
-        Jesteś odpowiedzialny za opis podanego zdjęcia, 
-        opisz wyróżniające się obiekty oraz całą scenę widoczną na zdjęciu, 
+        Jesteś odpowiedzialny za opisanie co zostało przedstawione na zdjęciu, 
+        opisz wyróżniające się obiekty oraz całą scenę widoczną na zdjęciu,
         jeżeli jest na nim coś nietypowego również o tym wspomnij.
         Jeżeli zdjęcie zawiera jakiś tekst zacytuj go nie zmieniając treści.
+        Nie skupiaj się na stylu zdjęcia.
         '''
         data = await get_http_data(link.url)
         LOG.info('Responded with some data {}', data[:20])
         match link.resource_type:
             case 'mp3':
-                if isinstance(data, str):
-                    return await transcribe(data)
+                return await transcribe(data)
             case 'png':
-                if isinstance(data, bytes):
-                    return await ask_about_image(system_prompt, data, 'Zdjęcie: ')
+                return await ask_about_image(system_prompt, data, 'Zdjęcie: ')
 
     # Iterate over links in the sections to get the context for each using LLM
     for l_section in sections_with_links:
@@ -482,6 +481,7 @@ async def arxiv():
     You are responsible for answering asked questions, you have to use the provided context, all the answers are there.
     The only way for you to respond is in a JSON format. Answer each question with one concise sentence.
     Follow defined response format. Think about the answer before answering, there might be trick questions.
+    Tag <Załącznik> describes the attachments included in the document, text around this tag will probably reference the attachment so keep this in mind. Photo of a tower was done in Kraków. The photo of a cake is in fact a "pizza z ananasem"
 
     <Context>
     {full_context}
