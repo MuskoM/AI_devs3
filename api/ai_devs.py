@@ -2,15 +2,16 @@ import asyncio
 from collections import defaultdict
 from os import environ
 import re
-from typing import Annotated, Any, Coroutine, Literal
+from typing import Annotated, Any, Coroutine, Literal, Optional
 import json
 from zipfile import ZipFile
 
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, Form, Response, UploadFile
 from fastapi.responses import JSONResponse
 from firecrawl import FirecrawlApp
 from httpx import AsyncClient, HTTPStatusError
 from loguru import logger as LOG
+from pydantic import Field
 import yaml
 
 from exceptions import ApiException
@@ -21,6 +22,7 @@ from services.data_transformers import chunker
 from services.data_transformers.markdown import MarkdownLink
 from services.ingestService import read_files_from_zip
 from services.memory.cache_service import FileCacheService
+from services.vectorService import EmbeddingService, VectorService
 from services.web.web_interaction import get_http_data, send_dict_as_json, send_form, get_page
 from services.prompts import PromptService
 
@@ -624,3 +626,25 @@ async def documents(reports_archive: UploadFile, facts_archive: UploadFile):
     # Send answer
     answer_result = await send_answer(AiDevsAnswer(task='dokumenty', apikey=API_TASK_KEY, answer={file_name: tags.split('**final_answer**')[-1] for file_name, tags in zip(label_file_names, result_labeled_files)}))
     return answer_result
+
+@router.post('/vectors')
+async def vectors_task(weapons_zip: UploadFile | None = None, query: str | None = Form(None) ):
+    embedding_service = EmbeddingService('http://localhost:11434/v1', 'nomic-embed-text')
+    vectorService = VectorService(embedding_service, 'AI_Devs3')
+
+    if weapons_zip is not None:
+        weapon_test_files = read_files_from_zip(weapons_zip.file, file_types=['txt'])
+        LOG.info('Indexing {} files', len(weapon_test_files))
+        index_file_content_coro = [vectorService.insert_into_collection('wektory', [content.decode()], tags=[name]) for name, content in weapon_test_files]
+        indexed_data = await asyncio.gather(*index_file_content_coro)
+        return Response(f'Inserted {list(indexed_data)} entries')
+
+
+    if query:
+        LOG.info('Querying: {} in files', len(query))
+        matches = await vectorService.search_in_collection('wektory', [query], limit=1, output_fields=['tags', 'text'])
+        answer = matches[0][0]['entity']['tags'][0].replace('_', '-').split('.')[0]
+        result = await send_answer(AiDevsAnswer(task='wektory', apikey=API_TASK_KEY, answer=answer))
+        LOG.info('Answered {}', answer)
+        return result
+
