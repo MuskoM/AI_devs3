@@ -55,7 +55,7 @@ class VectorService:
         '''Insert documents into a collection with tags'''
         self.__ensure_collection(collection_name)
         self.__ensure_embedding_service_setup()
-        generate_embeddings_coro = [self._embedding_service.generate_embedding(f'search_document: {doc}') for doc in docs] #type: ignore
+        generate_embeddings_coro = [self._embedding_service.generate_embedding(doc) for doc in docs] #type: ignore
         vectors = await asyncio.gather(*generate_embeddings_coro)
         LOG.info('Generated embeddings for docs {} ', len(vectors[0].data))
         data = [{'vector': vector.data[0].embedding, 'uuid': 'UIDHERE', 'text': doc, 'tags': tags} for doc, vector in zip(docs,vectors)]
@@ -67,7 +67,7 @@ class VectorService:
         Returns for each doc a list of matched entries in collection
         '''
         self.__ensure_collection(collection_name)
-        generate_embeddings_coro = [self._embedding_service.generate_embedding(f'search_document: {doc}') for doc in docs] #type: ignore
+        generate_embeddings_coro = [self._embedding_service.generate_embedding(doc) for doc in docs] #type: ignore
         vectors = await asyncio.gather(*generate_embeddings_coro)
         return self.client.search(collection_name, [embedding.data[0].embedding for embedding in vectors], limit=limit, output_fields=output_fields) #type: ignore
 

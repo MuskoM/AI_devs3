@@ -629,20 +629,23 @@ async def documents(reports_archive: UploadFile, facts_archive: UploadFile):
 
 @router.post('/vectors')
 async def vectors_task(weapons_zip: UploadFile | None = None, query: str | None = Form(None) ):
-    embedding_service = EmbeddingService('http://localhost:11434/v1', 'nomic-embed-text')
+    collection_name = 'wektory_bge'
+    embedding_service = EmbeddingService('http://localhost:11434/v1', 'bge-m3')
     vectorService = VectorService(embedding_service, 'AI_Devs3')
+
+    vectorService.create_collection(collection_name,1024)
 
     if weapons_zip is not None:
         weapon_test_files = read_files_from_zip(weapons_zip.file, file_types=['txt'])
         LOG.info('Indexing {} files', len(weapon_test_files))
-        index_file_content_coro = [vectorService.insert_into_collection('wektory', [content.decode()], tags=[name]) for name, content in weapon_test_files]
+        index_file_content_coro = [vectorService.insert_into_collection(collection_name, [content.decode()], tags=[name]) for name, content in weapon_test_files]
         indexed_data = await asyncio.gather(*index_file_content_coro)
         return Response(f'Inserted {list(indexed_data)} entries')
 
 
     if query:
         LOG.info('Querying: {} in files', len(query))
-        matches = await vectorService.search_in_collection('wektory', [query], limit=1, output_fields=['tags', 'text'])
+        matches = await vectorService.search_in_collection(collection_name, [query], limit=1, output_fields=['tags', 'text'])
         answer = matches[0][0]['entity']['tags'][0].replace('_', '-').split('.')[0]
         result = await send_answer(AiDevsAnswer(task='wektory', apikey=API_TASK_KEY, answer=answer))
         LOG.info('Answered {}', answer)
