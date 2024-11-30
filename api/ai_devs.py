@@ -1,7 +1,5 @@
 import asyncio
 from collections import defaultdict
-from datetime import datetime as dt
-from pytz import utc
 from os import environ
 import re
 from typing import Annotated, Any, Coroutine, Literal
@@ -12,13 +10,11 @@ from fastapi import APIRouter, Depends, Form, Response, UploadFile
 from fastapi.responses import JSONResponse
 from firecrawl import FirecrawlApp
 from httpx import AsyncClient, HTTPStatusError
-from langfuse.decorators import observe
-from langfuse.openai import langfuse_context
 from loguru import logger as LOG
-import yaml
 
 from exceptions import ApiException
 from models.ai_devs import AiDevsAnswer, AiDevsResponse
+from services.ai_devs.storeService import AIDevsStore, API_TASK_KEY
 from services.ai.modelService import ask_about_image, complete_task, generate_image, send_once, transcribe
 from services.ai_devs.task_api_v3 import send_answer
 from services.data_transformers import chunker
@@ -30,40 +26,12 @@ from services.vectorService import EmbeddingService, VectorService
 from services.web.web_interaction import get_http_data, send_dict_as_json, send_form, get_page
 from services.prompts import PromptService
 
-class AIDevsStore:
-    def __init__(self) -> None:
-        self.secrets: dict[str, Any] = self.initStore()
-
-    def initStore(self) -> dict[str, Any]:
-        try:
-            with open('.secrets.yml') as file:
-                return yaml.safe_load(file)
-        except FileNotFoundError:
-            LOG.error('Unable to find .secrets.yaml file, tasks from AI_Devs will not work')
-            return {}
-
-    def read_task_secrets(self, task_name: str) -> dict[str, Any]:
-        task_secrets = self.secrets.get(task_name)
-        if task_secrets:
-            return task_secrets
-        return {}
-
 store = AIDevsStore()
 prompt_service = PromptService(label='ai_devs')
-
-def task_secrets():
-    return store.read_task_secrets('corrupt_json')
-
-TaskSecrets = Annotated[dict, Depends(task_secrets)]
 
 Prompts = Annotated[PromptService, Depends(PromptService)]
 
 router = APIRouter(tags=['ai_devs'], prefix='/ai_devs')
-
-try:
-    API_TASK_KEY = environ['AI_DEVS_TASK_KEY']
-except KeyError:
-    raise EnvironmentError('AI_DEVS_TASK_KEY not found, have you provided a key?')
 
 @router.get('/')
 async def get_tasks():
@@ -71,7 +39,7 @@ async def get_tasks():
 
 
 @router.get('/poligon')
-async def poligon_task(secrets: TaskSecrets):
+async def poligon_task():
     LOG.info('Executing Poligon Task')
     secrets = store.read_task_secrets('poligon')
     task_data_url = secrets.get('data_source', '')
@@ -85,7 +53,7 @@ async def poligon_task(secrets: TaskSecrets):
         return task_api_response
 
 @router.get('/captcha')
-async def captcha_task(secrets: TaskSecrets):
+async def captcha_task():
     LOG.info('Executing Captcha Task')
     secrets = store.read_task_secrets('captcha')
     task_url = secrets.get('task_url', '')
@@ -117,7 +85,7 @@ async def captcha_task(secrets: TaskSecrets):
     return found_info
 
 @router.get('/bypass_check')
-async def bypass_check_task(secrets: TaskSecrets):
+async def bypass_check_task():
     secrets = store.read_task_secrets('bypass_check')
     authorization_endpoint = secrets.get('task_url', '')
     try:
@@ -151,7 +119,7 @@ async def bypass_check_task(secrets: TaskSecrets):
         return {'error': f'{err.response.status_code} - {err.request}'}
 
 @router.get('/corrupt_json')
-async def corrupt_json(secrets: TaskSecrets):
+async def corrupt_json():
     def check_calculation(calculation: dict[str,Any]):
         def calculate_addition(addition: str) -> int:
             a, b = [int(x) for x in addition.split('+')]
@@ -234,7 +202,7 @@ async def corrupt_json(secrets: TaskSecrets):
 
 
 @router.get('/cenzura')
-async def cenzura_task(secrets: TaskSecrets):
+async def cenzura_task():
     secrets = store.read_task_secrets('cenzura')
     source_text_url: str = secrets.get('source_text', '')
     submit_task_url: str = secrets.get('submit_url','')
@@ -625,145 +593,6 @@ async def vectors_task(weapons_zip: UploadFile | None = None, query: str | None 
         LOG.info('Answered {}', answer)
         return result
 
-@router.get('/database')
-@observe()
-async def database_retrieval():
-    failsafe = 10
-    context_data = []
-    async def send_query(url: str, query: str):
-        response = await send_dict_as_json(url,data={
-            'task': 'database',
-            'apikey': API_TASK_KEY,
-            'query': query
-        })
-        return response.json()
-
-    def extract_query_from_response(resp: str):
-        return resp.split('%%final_query%%')[-1].replace('\n','')
-    
-    def construct_context():
-        return '\n\n'.join(context_data)
-
-    def construct_prompt():
-        context = construct_context()
-        try:
-            prompt, _ = prompt_service.get_prompt('AI_DEVS_DATABASE_SEARCH', context=context)
-            return prompt
-        except ApiException:
-            raise
-
-    langfuse_context.update_current_trace(session_id=f'DATABASE_{dt.now(tz=utc)}')
-    secrets = store.read_task_secrets('database')
-    db_url = secrets.get('database_api_url', '')
-    question = 'które aktywne datacenter (DC_ID) są zarządzane przez pracowników, którzy są na urlopie (is_active=0)'
-    
-    query = ''
-    i = 0
-
-    while failsafe >= i:
-        # Check if we can construct the query with available knowledge, if not progress with thinking
-        prompt = construct_prompt()
-        try:
-            task_response = await complete_task(prompt, question)
-        except ApiException as err:
-            return JSONResponse({'err': str(err)}, status_code=500)
-        LOG.info('Response from task {}', task_response)
-
-        # Extract final_query from response (remove %%thinking%% part from response)
-        query = extract_query_from_response(task_response)
-
-        # Verify if the given prompt can answer the question
-        verification_prompt, _ = prompt_service.get_prompt('AI_DEVS_DATABASE_VERIFY_QUERY', question=question)
-        verification_response = await complete_task(verification_prompt, query)
-        # If it can send the answer to API
-        if int(verification_response) == 1:
-            response = await send_query(db_url, query)
-            found_ids = re.findall(r'[0-9]{4}', str(response))
-            LOG.info('Final answer {}, for response {}', found_ids, response)
-            return await send_answer(AiDevsAnswer(task='database', apikey=API_TASK_KEY, answer=found_ids))
-
-        # If not, progress
-        response = await send_query(db_url, query)
-
-        # Only add to the context if the response is not null
-        if response:
-            context_data.append(f"Completed Query: {query}, result: {str(response['reply'])}")
-        i = i + 1
-
-# ============================
-
-@observe()
-@router.get('/loop')
-async def loop_task():
-    secrets = store.read_task_secrets('loop')
-
-    # Get note about Barbara
-    note_text = await get_page(url=secrets.get('note_url', ''))
-    LOG.info('Fetched note {}', note_text)
-
-    # Functions for interaction with the apis
-    async def ask_about_person(name: str):
-        resp =  await send_dict_as_json(
-            url=secrets.get('people_api_url',''),
-            data={'apikey': API_TASK_KEY, 'query': name}
-        )
-        return resp.json()['message'].split(' ')
-
-    async def ask_about_places(name: str):
-        resp = await send_dict_as_json(
-            url=secrets.get('places_api_url',''),
-            data={'apikey': API_TASK_KEY, 'query': name}
-        )
-        return resp.json()['message'].split(' ')
-
-    async def verify_answer(relations:dict):
-        verify_prompt = f'''
-        You are given a hashmap which contains relations between people and cities:
-        <relations>
-        {relations}
-        </relations>
-        In what city is Barbara now? 
-        Return only the name of the city (single word).
-        If you are unable to answer return 0.
-        '''
-        return await complete_task(verify_prompt,'',)
-
-    # Extract information about people and places in the note
-    sys_prompt = '''
-    You are responsible for extracting first names of people, and cities in the provided text.
-    All names should be listed in their nominative case (Marcina => Marcin).
-    In the list of people use only their first name.
-    All names with polish letters should be simplified to letters from english alphabet (Rafał => Rafal, Kraków => Krakow).
-
-    <Output_schema>
-    USER: ...User message...
-    AI: {"people":[], "places": []}
-    </Output_schema>
-    
-    '''
-    note_informations_raw = await complete_task(sys_prompt, note_text, local_model='gemma2:9b')
-    try:
-        note_informations = json.loads(note_informations_raw)
-    except json.JSONDecodeError:
-        # If returned json is incorrect, fix it using LLM
-        fix_prompt = """Return correct JSON (don't include markdown syntax with ```) for:"""
-        note_informations = json.loads(await complete_task(fix_prompt, note_informations_raw, local_model='gemma2:9b'))
-
-    # Known people and places
-    places = set()
-    people = set()
-    
-    for person_name in note_informations['people']:
-        people = {*people,*await ask_about_person(person_name)}
-
-    for city_name in note_informations['places']:
-        places = {*places,*await ask_about_places(city_name)}
-
-
-    return {
-        'places': places,
-        'people': people,
-    }
 
 @router.get('/connections')
 async def connections():
