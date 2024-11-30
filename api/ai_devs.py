@@ -1,8 +1,10 @@
 import asyncio
 from collections import defaultdict
+from datetime import datetime as dt
+from pytz import utc
 from os import environ
 import re
-from typing import Annotated, Any, Coroutine, Literal, Optional
+from typing import Annotated, Any, Coroutine, Literal
 import json
 from zipfile import ZipFile
 
@@ -10,8 +12,9 @@ from fastapi import APIRouter, Depends, Form, Response, UploadFile
 from fastapi.responses import JSONResponse
 from firecrawl import FirecrawlApp
 from httpx import AsyncClient, HTTPStatusError
+from langfuse.decorators import observe
+from langfuse.openai import langfuse_context
 from loguru import logger as LOG
-from pydantic import Field
 import yaml
 
 from exceptions import ApiException
@@ -20,6 +23,7 @@ from services.ai.modelService import ask_about_image, complete_task, generate_im
 from services.ai_devs.task_api_v3 import send_answer
 from services.data_transformers import chunker
 from services.data_transformers.markdown import MarkdownLink
+from services import graphService
 from services.ingestService import read_files_from_zip
 from services.memory.cache_service import FileCacheService
 from services.vectorService import EmbeddingService, VectorService
@@ -351,42 +355,12 @@ async def categories_task(archive: UploadFile):
     LOG.info('Context created {}', results)
 
     async def categorize_information(data: str, filename: str):
-        sys_prompt = '''
-        I'm responsible discovering if the data provided contains information about:
-        - hardware malfunctions
-        - people that got captured
+        try:
+            system_prompt, lf_prompt = prompt_service.get_prompt('AI_DEVS_CATEGORIZE_REPORT_INFORMATION')
+        except ApiException as err:
+            return JSONResponse(content=str(err), status_code=500)
 
-        If you give me any data I will think about the content of the data:
-        - What subjects are mentioned? (people, hardware, machines)
-        - What is described? (hardware, software, people, machines)
-        - Who made the note, was it done by a human or machine?
-
-        Based on those criteria I will assign the labels.
-
-        <Rules>
-        - Software changes don't count towards hardware
-        - Think if the note describes people captured if yes, then assign people label
-        - If information mentions clues about people location assign people label but ONLY if the note is done by a machine.
-        </Rules
-
-        Result of my reasoning will be included in **thinking** section.
-        My final answer will occur after **final_answer**, which will be the last section in the answer.
-
-        The single word provided after **final_answer** is a category of information provided.
-        Available categories:
-        - people
-        - hardware
-        - other
-        Give me some information you want me to categorize.
-
-        <Example>
-        **thinking**
-        <Here is the thinking process>
-        **final_answer**
-        <category>
-        </Example>
-        '''
-        return filename, await complete_task(sys_prompt,data, model='gpt-4o')
+        return filename, await complete_task(system_prompt,data, model='gpt-4o', langfuse_prompt=lf_prompt)
 
     coroutines = [categorize_information(context, filename) for filename, context in results]
     results: list[tuple[str,str]] = await asyncio.gather(*coroutines)
@@ -627,7 +601,7 @@ async def documents(reports_archive: UploadFile, facts_archive: UploadFile):
     answer_result = await send_answer(AiDevsAnswer(task='dokumenty', apikey=API_TASK_KEY, answer={file_name: tags.split('**final_answer**')[-1] for file_name, tags in zip(label_file_names, result_labeled_files)}))
     return answer_result
 
-@router.post('/vectors')
+@router.post('/vectors', response_model=AiDevsResponse)
 async def vectors_task(weapons_zip: UploadFile | None = None, query: str | None = Form(None) ):
     collection_name = 'wektory_bge'
     embedding_service = EmbeddingService('http://localhost:11434/v1', 'bge-m3')
@@ -651,3 +625,151 @@ async def vectors_task(weapons_zip: UploadFile | None = None, query: str | None 
         LOG.info('Answered {}', answer)
         return result
 
+@router.get('/database')
+@observe()
+async def database_retrieval():
+    failsafe = 10
+    context_data = []
+    async def send_query(url: str, query: str):
+        response = await send_dict_as_json(url,data={
+            'task': 'database',
+            'apikey': API_TASK_KEY,
+            'query': query
+        })
+        return response.json()
+
+    def extract_query_from_response(resp: str):
+        return resp.split('%%final_query%%')[-1].replace('\n','')
+    
+    def construct_context():
+        return '\n\n'.join(context_data)
+
+    def construct_prompt():
+        context = construct_context()
+        try:
+            prompt, _ = prompt_service.get_prompt('AI_DEVS_DATABASE_SEARCH', context=context)
+            return prompt
+        except ApiException:
+            raise
+
+    langfuse_context.update_current_trace(session_id=f'DATABASE_{dt.now(tz=utc)}')
+    secrets = store.read_task_secrets('database')
+    db_url = secrets.get('database_api_url', '')
+    question = 'które aktywne datacenter (DC_ID) są zarządzane przez pracowników, którzy są na urlopie (is_active=0)'
+    
+    query = ''
+    i = 0
+
+    while failsafe >= i:
+        # Check if we can construct the query with available knowledge, if not progress with thinking
+        prompt = construct_prompt()
+        try:
+            task_response = await complete_task(prompt, question)
+        except ApiException as err:
+            return JSONResponse({'err': str(err)}, status_code=500)
+        LOG.info('Response from task {}', task_response)
+
+        # Extract final_query from response (remove %%thinking%% part from response)
+        query = extract_query_from_response(task_response)
+
+        # Verify if the given prompt can answer the question
+        verification_prompt, _ = prompt_service.get_prompt('AI_DEVS_DATABASE_VERIFY_QUERY', question=question)
+        verification_response = await complete_task(verification_prompt, query)
+        # If it can send the answer to API
+        if int(verification_response) == 1:
+            response = await send_query(db_url, query)
+            found_ids = re.findall(r'[0-9]{4}', str(response))
+            LOG.info('Final answer {}, for response {}', found_ids, response)
+            return await send_answer(AiDevsAnswer(task='database', apikey=API_TASK_KEY, answer=found_ids))
+
+        # If not, progress
+        response = await send_query(db_url, query)
+
+        # Only add to the context if the response is not null
+        if response:
+            context_data.append(f"Completed Query: {query}, result: {str(response['reply'])}")
+        i = i + 1
+
+# ============================
+
+@observe()
+@router.get('/loop')
+async def loop_task():
+    secrets = store.read_task_secrets('loop')
+
+    # Get note about Barbara
+    note_text = await get_page(url=secrets.get('note_url', ''))
+    LOG.info('Fetched note {}', note_text)
+
+    # Functions for interaction with the apis
+    async def ask_about_person(name: str):
+        resp =  await send_dict_as_json(
+            url=secrets.get('people_api_url',''),
+            data={'apikey': API_TASK_KEY, 'query': name}
+        )
+        return resp.json()['message'].split(' ')
+
+    async def ask_about_places(name: str):
+        resp = await send_dict_as_json(
+            url=secrets.get('places_api_url',''),
+            data={'apikey': API_TASK_KEY, 'query': name}
+        )
+        return resp.json()['message'].split(' ')
+
+    async def verify_answer(relations:dict):
+        verify_prompt = f'''
+        You are given a hashmap which contains relations between people and cities:
+        <relations>
+        {relations}
+        </relations>
+        In what city is Barbara now? 
+        Return only the name of the city (single word).
+        If you are unable to answer return 0.
+        '''
+        return await complete_task(verify_prompt,'',)
+
+    # Extract information about people and places in the note
+    sys_prompt = '''
+    You are responsible for extracting first names of people, and cities in the provided text.
+    All names should be listed in their nominative case (Marcina => Marcin).
+    In the list of people use only their first name.
+    All names with polish letters should be simplified to letters from english alphabet (Rafał => Rafal, Kraków => Krakow).
+
+    <Output_schema>
+    USER: ...User message...
+    AI: {"people":[], "places": []}
+    </Output_schema>
+    
+    '''
+    note_informations_raw = await complete_task(sys_prompt, note_text, local_model='gemma2:9b')
+    try:
+        note_informations = json.loads(note_informations_raw)
+    except json.JSONDecodeError:
+        # If returned json is incorrect, fix it using LLM
+        fix_prompt = """Return correct JSON (don't include markdown syntax with ```) for:"""
+        note_informations = json.loads(await complete_task(fix_prompt, note_informations_raw, local_model='gemma2:9b'))
+
+    # Known people and places
+    places = set()
+    people = set()
+    
+    for person_name in note_informations['people']:
+        people = {*people,*await ask_about_person(person_name)}
+
+    for city_name in note_informations['places']:
+        places = {*places,*await ask_about_places(city_name)}
+
+
+    return {
+        'places': places,
+        'people': people,
+    }
+
+@router.get('/connections')
+async def connections():
+    # Uncomment to populate the database
+    # await graphService.populate_database_for_connections_task()
+    records, _, _ = await graphService.shortest_between_users('Rafał', 'Barbara')
+    names = [el['name'] for el in records[0].data()['path'] if not isinstance(el, str)]
+    LOG.info('Names: {}', names)
+    return await send_answer(AiDevsAnswer(task='connections', apikey=API_TASK_KEY, answer=','.join(names)))

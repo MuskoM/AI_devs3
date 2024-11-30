@@ -10,16 +10,23 @@ from exceptions import ApiException
 async def complete_task(
         system_prompt: str,
         data_prompt: str,
-        model: str = 'gpt-4o-mini'
+        model: str = 'gpt-4o-mini',
+        local_model: str = '',
+        **kwargs
 ) -> str:
     LOG.info('Sending to {}, sys=({}), usr=({})', model, system_prompt, data_prompt)
-    async with AsyncOpenAI() as ai:
+    client_args = {}
+    if local_model:
+        client_args['base_url'] = 'http://localhost:11434/v1'
+        model = local_model
+    async with AsyncOpenAI(**client_args) as ai:
         response = await ai.chat.completions.create( # type: ignore
             messages=[
                 {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': data_prompt}
             ],
-            model=model
+            model=model,
+            **kwargs
         )
         return str(response.choices[0].message.content)
 
